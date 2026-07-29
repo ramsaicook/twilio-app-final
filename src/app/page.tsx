@@ -48,37 +48,49 @@ export default function TwilioSoftphone() {
   }, []);
 
   const checkSettings = async () => {
-    try {
-      const res = await fetch("/api/settings");
-      const data = await res.json();
+    const lsAccountSid = localStorage.getItem('twilioAccountSid');
+    const lsAuthToken = localStorage.getItem('twilioAuthToken');
+    const lsApiKey = localStorage.getItem('twilioApiKey');
+    const lsApiSecret = localStorage.getItem('twilioApiSecret');
+    const lsTwimlAppSid = localStorage.getItem('twilioTwimlAppSid');
+    const lsFwd = localStorage.getItem('twilioFwd') || "";
+    const lsRec = localStorage.getItem('twilioRec') === 'true';
+    const lsDnd = localStorage.getItem('twilioDnd') === 'true';
+    
+    if (lsAccountSid && lsAuthToken) {
+      setHasCredentials(true);
+      setInputSid(lsAccountSid);
+      setInputToken(lsAuthToken);
+      setForwardingNumber(lsFwd);
+      setRecordCalls(lsRec);
+      setDoNotDisturb(lsDnd);
       
-      if (data.hasCredentials) {
-        const numRes = await fetch("/api/twilio/numbers");
+      try {
+        const numRes = await fetch("/api/twilio/numbers", {
+          headers: {
+            'x-twilio-sid': lsAccountSid,
+            'x-twilio-token': lsAuthToken
+          }
+        });
         const numData = await numRes.json();
-        
         if (numData.error) {
-          setHasCredentials(false);
-          setAuthError(`Authentication failed: ${numData.error}. Please check your credentials.`);
-          return;
+           setHasCredentials(false);
+           setAuthError("Auth failed: " + numData.error);
+           return;
         }
-        
-        setHasCredentials(true);
-        setAuthError("");
-        setForwardingNumber(data.forwardingNumber || "");
-        setRecordCalls(data.recordCalls || false);
-        setDoNotDisturb(data.doNotDisturb || false);
-
         setNumbers(numData.numbers || []);
         if (numData.numbers?.length > 0) setSelectedNumber(numData.numbers[0].phoneNumber);
         
-        fetchToken();
-        fetchMessages();
-        fetchRecordings();
-      } else {
-        setHasCredentials(false);
+        if (lsApiKey && lsApiSecret && lsTwimlAppSid) {
+           fetchToken(lsAccountSid, lsApiKey, lsApiSecret, lsTwimlAppSid);
+        }
+        fetchMessages(lsAccountSid, lsAuthToken);
+        fetchRecordings(lsAccountSid, lsAuthToken);
+      } catch (e) {
+        console.error(e);
       }
-    } catch (e) {
-      console.error(e);
+    } else {
+      setHasCredentials(false);
     }
   };
 
@@ -87,57 +99,49 @@ export default function TwilioSoftphone() {
     setSettingsLoading(true);
     setAuthError("");
     try {
-      await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountSid: inputSid, authToken: inputToken })
-      });
-      setInputSid("");
-      setInputToken("");
-      await checkSettings();
-    } catch (e) {
-      console.error(e);
-    }
-    setSettingsLoading(false);
-  };
-
-  const saveAppSettings = async () => {
-    setAppSettingsLoading(true);
-    try {
-      await fetch("/api/settings", {
+      const res = await fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
-          forwardingNumber,
-          recordCalls,
-          doNotDisturb
+          accountSid: inputSid, 
+          authToken: inputToken,
+          apiKey: localStorage.getItem('twilioApiKey') || undefined,
+          apiSecret: localStorage.getItem('twilioApiSecret') || undefined,
+          twimlAppSid: localStorage.getItem('twilioTwimlAppSid') || undefined,
+          forwardingNumber: localStorage.getItem('twilioFwd') || "",
+          recordCalls: localStorage.getItem('twilioRec') === 'true',
+          doNotDisturb: localStorage.getItem('twilioDnd') === 'true'
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      
+      localStorage.setItem('twilioAccountSid', inputSid);
+      localStorage.setItem('twilioAuthToken', inputToken);
+      if (data.apiKey) localStorage.setItem('twilioApiKey', data.apiKey);
+      if (data.apiSecret) localStorage.setItem('twilioApiSecret', data.apiSecret);
+      if (data.twimlAppSid) localStorage.setItem('twilioTwimlAppSid', data.twimlAppSid);
+      
+      await checkSettings();
+    } catch (e: any) {
+      setAuthError("Failed to save credentials: " + e.message);
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
+
+  const fetchToken = async (sid?: string, key?: string, sec?: string, appSid?: string) => {
+    try {
+      const res = await fetch("/api/twilio/token", {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accountSid: sid || localStorage.getItem('twilioAccountSid'),
+          apiKey: key || localStorage.getItem('twilioApiKey'),
+          apiSecret: sec || localStorage.getItem('twilioApiSecret'),
+          twimlAppSid: appSid || localStorage.getItem('twilioTwimlAppSid')
         })
       });
-      alert("Application settings saved successfully!");
-    } catch (e) {
-      console.error(e);
-    }
-    setAppSettingsLoading(false);
-  };
-
-  const logout = async () => {
-    await fetch("/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accountSid: "", authToken: "" }) // Clear them
-    });
-    setHasCredentials(false);
-    setNumbers([]);
-    setMessages([]);
-    if (device) {
-      device.destroy();
-      setDevice(null);
-    }
-  };
-
-  const fetchToken = async () => {
-    try {
-      const res = await fetch("/api/twilio/token");
       const data = await res.json();
       if (data.token) {
         setToken(data.token);
@@ -187,23 +191,34 @@ export default function TwilioSoftphone() {
     if (!device || !destNumber || !selectedNumber) return;
     try {
       setCallStatus("Calling...");
-      const params = { To: destNumber, CallerId: selectedNumber };
-      const call = await device.connect({ params });
+      const params = {
+        To: destNumber,
+        CallerId: selectedNumber
+      };
       
+      const call = await device.connect({ params });
       setConnection(call);
-      call.on("accept", () => setCallStatus("In Call"));
+      setCallStatus("In Call");
+      
       call.on("disconnect", () => {
         setConnection(null);
         setCallStatus("Ready");
       });
-      call.on("error", (error: any) => {
-        console.error("Call error", error);
-        setCallStatus("Call Error");
-        setConnection(null);
-      });
-    } catch (e) {
-      console.error("Connect error", e);
-      setCallStatus("Connect Error");
+    } catch (error) {
+      console.error("Call error", error);
+      setCallStatus("Call Failed");
+    }
+  };
+
+  const acceptCall = () => {
+    if (connection) {
+      connection.accept();
+    }
+  };
+
+  const rejectCall = () => {
+    if (connection) {
+      connection.reject();
     }
   };
 
@@ -213,31 +228,18 @@ export default function TwilioSoftphone() {
     }
   };
 
-  const acceptCall = () => {
-    if (connection) {
-      connection.accept();
-    }
-  };
-  
-  const rejectCall = () => {
-    if (connection) {
-      connection.reject();
-    }
-  };
-
-  const fetchMessages = async () => {
-    const res = await fetch("/api/twilio/sms");
-    const data = await res.json();
-    if (data.messages) {
-      setMessages(data.messages);
-    }
-  };
-  
-  const fetchRecordings = async () => {
-    const res = await fetch("/api/twilio/recordings");
-    const data = await res.json();
-    if (data.recordings) {
-      setRecordings(data.recordings);
+  const fetchMessages = async (sid?: string, token?: string) => {
+    try {
+      const res = await fetch("/api/twilio/sms", {
+        headers: {
+          'x-twilio-sid': sid || localStorage.getItem('twilioAccountSid') || '',
+          'x-twilio-token': token || localStorage.getItem('twilioAuthToken') || ''
+        }
+      });
+      const data = await res.json();
+      if (data.messages) setMessages(data.messages);
+    } catch (e) {
+      console.error(e);
     }
   };
 
@@ -247,29 +249,95 @@ export default function TwilioSoftphone() {
     try {
       await fetch("/api/twilio/sms", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          to: smsDest,
-          from: selectedNumber,
-          message: smsMessage
-        })
+        headers: { 
+          "Content-Type": "application/json",
+          'x-twilio-sid': localStorage.getItem('twilioAccountSid') || '',
+          'x-twilio-token': localStorage.getItem('twilioAuthToken') || ''
+        },
+        body: JSON.stringify({ to: smsDest, from: selectedNumber, body: smsMessage }),
       });
       setSmsMessage("");
       fetchMessages();
     } catch (e) {
       console.error(e);
+    } finally {
+      setSmsLoading(false);
     }
-    setSmsLoading(false);
+  };
+
+  const fetchRecordings = async (sid?: string, token?: string) => {
+    try {
+      const res = await fetch("/api/twilio/recordings", {
+        headers: {
+          'x-twilio-sid': sid || localStorage.getItem('twilioAccountSid') || '',
+          'x-twilio-token': token || localStorage.getItem('twilioAuthToken') || ''
+        }
+      });
+      const data = await res.json();
+      if (data.recordings) setRecordings(data.recordings);
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const configureNumber = async (sid: string) => {
-    await fetch("/api/twilio/numbers", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sid })
-    });
-    alert("Number configured to route calls to this Web Phone.");
-    checkSettings();
+    try {
+      await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          accountSid: localStorage.getItem('twilioAccountSid'),
+          authToken: localStorage.getItem('twilioAuthToken'),
+          apiKey: localStorage.getItem('twilioApiKey'),
+          apiSecret: localStorage.getItem('twilioApiSecret'),
+          twimlAppSid: localStorage.getItem('twilioTwimlAppSid'),
+          forwardingNumber,
+          doNotDisturb,
+          recordCalls
+        })
+      });
+      alert("Webhook successfully configured for this number!");
+    } catch (e) {
+      console.error(e);
+      alert("Failed to configure webhook");
+    }
+  };
+
+  const saveAppSettings = async () => {
+    setAppSettingsLoading(true);
+    try {
+      localStorage.setItem('twilioFwd', forwardingNumber);
+      localStorage.setItem('twilioRec', recordCalls ? 'true' : 'false');
+      localStorage.setItem('twilioDnd', doNotDisturb ? 'true' : 'false');
+      await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          accountSid: localStorage.getItem('twilioAccountSid'),
+          authToken: localStorage.getItem('twilioAuthToken'),
+          apiKey: localStorage.getItem('twilioApiKey'),
+          apiSecret: localStorage.getItem('twilioApiSecret'),
+          twimlAppSid: localStorage.getItem('twilioTwimlAppSid'),
+          forwardingNumber, 
+          recordCalls, 
+          doNotDisturb 
+        }),
+      });
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setAppSettingsLoading(false);
+    }
+  };
+
+  const logout = () => {
+    localStorage.clear();
+    setHasCredentials(false);
+    setInputSid("");
+    setInputToken("");
+    setForwardingNumber("");
+    setRecordCalls(false);
+    setDoNotDisturb(false);
   };
 
   if (!hasCredentials) {
@@ -423,7 +491,7 @@ export default function TwilioSoftphone() {
                 <div>
                   <div className="flex justify-between items-center mb-4">
                     <h3 className="text-lg font-medium">Recent Messages</h3>
-                    <Button variant="outline" size="sm" onClick={fetchMessages}>Refresh</Button>
+                    <Button variant="outline" size="sm" onClick={() => fetchMessages()}>Refresh</Button>
                   </div>
                   <ScrollArea className="h-[300px] border rounded-md p-4 bg-slate-50">
                     {messages.length === 0 && <p className="text-muted-foreground text-sm text-center mt-10">No messages found.</p>}
@@ -450,7 +518,7 @@ export default function TwilioSoftphone() {
             <TabsContent value="voicemail" className="p-4 border rounded-md mt-4 bg-white">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-lg font-medium">Recordings & Voicemails</h3>
-                <Button variant="outline" size="sm" onClick={fetchRecordings}>Refresh</Button>
+                <Button variant="outline" size="sm" onClick={() => fetchRecordings()}>Refresh</Button>
               </div>
               <ScrollArea className="h-[300px] border rounded-md p-4 bg-slate-50">
                 {recordings.length === 0 && <p className="text-muted-foreground text-sm text-center mt-10">No recordings found.</p>}
@@ -462,10 +530,10 @@ export default function TwilioSoftphone() {
                         <p className="text-xs text-slate-500">{new Date(rec.dateCreated).toLocaleString()}</p>
                       </div>
                       <div className="flex gap-2">
-                        <audio controls src={rec.mediaUrl} className="h-8 w-48" />
-                        <Button variant="ghost" size="icon" asChild>
-                          <a href={rec.mediaUrl} target="_blank" rel="noreferrer" download><Download className="h-4 w-4" /></a>
-                        </Button>
+                        {rec.url && <audio controls src={rec.url} className="h-8 w-48" />}
+                        {rec.url && <Button variant="ghost" size="icon" asChild>
+                          <a href={rec.url} target="_blank" rel="noreferrer" download><Download className="h-4 w-4" /></a>
+                        </Button>}
                       </div>
                     </div>
                   ))}

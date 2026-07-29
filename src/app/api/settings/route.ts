@@ -1,38 +1,63 @@
 import { NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
-
-const SETUP_FILE_PATH = path.join(process.cwd(), '.twilio-setup.json');
-
-export async function GET() {
-  if (fs.existsSync(SETUP_FILE_PATH)) {
-    const data = JSON.parse(fs.readFileSync(SETUP_FILE_PATH, 'utf-8'));
-    return NextResponse.json({ 
-      hasCredentials: !!(data.accountSid && data.authToken),
-      accountSid: data.accountSid || '',
-      forwardingNumber: data.forwardingNumber || '',
-      recordCalls: data.recordCalls || false,
-      doNotDisturb: data.doNotDisturb || false
-    });
-  }
-  return NextResponse.json({ hasCredentials: false });
-}
+import twilio from 'twilio';
 
 export async function POST(request: Request) {
-  const body = await request.json();
-  
-  let setupData: any = {};
-  if (fs.existsSync(SETUP_FILE_PATH)) {
-    setupData = JSON.parse(fs.readFileSync(SETUP_FILE_PATH, 'utf-8'));
+  try {
+    const body = await request.json();
+    const { accountSid, authToken, forwardingNumber, doNotDisturb, recordCalls } = body;
+    let { apiKey, apiSecret, twimlAppSid } = body;
+    
+    if (!accountSid || !authToken) {
+      return NextResponse.json({ error: 'Missing credentials' }, { status: 400 });
+    }
+
+    const client = twilio(accountSid, authToken);
+    const host = request.headers.get('host') || 'localhost:3000';
+    const protocol = host.includes('localhost') ? 'http' : 'https';
+    
+    const voiceUrl = new URL(`${protocol}://${host}/api/twilio/voice`);
+    if (forwardingNumber) voiceUrl.searchParams.set('fwd', forwardingNumber);
+    if (doNotDisturb) voiceUrl.searchParams.set('dnd', '1');
+    if (recordCalls) voiceUrl.searchParams.set('rec', '1');
+
+    // Setup TwiML App
+    if (!twimlAppSid) {
+      const apps = await client.applications.list({ friendlyName: 'Web Phone App' });
+      if (apps.length > 0) {
+        twimlAppSid = apps[0].sid;
+        await client.applications(twimlAppSid).update({ voiceUrl: voiceUrl.toString() });
+      } else {
+        const app = await client.applications.create({ friendlyName: 'Web Phone App', voiceUrl: voiceUrl.toString() });
+        twimlAppSid = app.sid;
+      }
+    } else {
+      await client.applications(twimlAppSid).update({ voiceUrl: voiceUrl.toString() });
+    }
+
+    // Setup API Key
+    if (!apiKey || !apiSecret) {
+      const key = await client.newKeys.create({ friendlyName: 'Web Phone Key' });
+      apiKey = key.sid;
+      apiSecret = key.secret;
+    }
+
+    // Update incoming numbers
+    const numbers = await client.incomingPhoneNumbers.list();
+    for (const num of numbers) {
+      await client.incomingPhoneNumbers(num.sid).update({
+        voiceUrl: voiceUrl.toString(),
+        voiceMethod: 'POST'
+      });
+    }
+
+    return NextResponse.json({ 
+      success: true, 
+      apiKey, 
+      apiSecret, 
+      twimlAppSid 
+    });
+  } catch (error: any) {
+    console.error('Settings save error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
-  
-  if (body.accountSid !== undefined) setupData.accountSid = body.accountSid;
-  if (body.authToken !== undefined) setupData.authToken = body.authToken;
-  if (body.forwardingNumber !== undefined) setupData.forwardingNumber = body.forwardingNumber;
-  if (body.recordCalls !== undefined) setupData.recordCalls = body.recordCalls;
-  if (body.doNotDisturb !== undefined) setupData.doNotDisturb = body.doNotDisturb;
-  
-  fs.writeFileSync(SETUP_FILE_PATH, JSON.stringify(setupData, null, 2));
-  
-  return NextResponse.json({ success: true });
 }

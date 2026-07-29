@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
 import twilio from 'twilio';
-import { getCredentials } from '@/lib/twilio-setup';
 
 export async function GET(request: Request) {
-  const { accountSid, authToken } = getCredentials();
+  const accountSid = request.headers.get('x-twilio-sid');
+  const authToken = request.headers.get('x-twilio-token');
   if (!accountSid || !authToken) return NextResponse.json({ error: 'Missing credentials' }, { status: 400 });
   
   const client = twilio(accountSid, authToken);
@@ -25,16 +25,17 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const { accountSid, authToken } = getCredentials();
+  const accountSid = request.headers.get('x-twilio-sid');
+  const authToken = request.headers.get('x-twilio-token');
   if (!accountSid || !authToken) return NextResponse.json({ error: 'Missing credentials' }, { status: 400 });
   
   const client = twilio(accountSid, authToken);
   const body = await request.json();
-  const { to, from, message } = body;
+  const { to, from, body: messageBody } = body;
   
   try {
     const msg = await client.messages.create({
-      body: message,
+      body: messageBody,
       from: from,
       to: to
     });
